@@ -1,0 +1,900 @@
+# HuddleUp — SwiftUI Learning Guide (2026)
+
+> Build an athlete profile app with Hudl data import, SwiftUI Charts, and WebKit.
+> Assumes you already have `HuddleUpApp.swift` and `ContentView.swift` in Xcode.
+
+---
+
+## SECTION 1: Project Foundation & Data Model
+
+**What you'll learn:** Swift structs, `Identifiable`, `Codable`, and how SwiftUI binds to data.
+
+### 1A. Create `Athlete.swift`
+
+This is your single source of truth. Every view reads from this.
+
+```swift
+import Foundation
+
+struct Athlete: Identifiable, Codable {
+    let id: UUID
+    var name: String
+    var position: String
+    var school: String
+    var graduationYear: Int
+    var profileImageName: String? // local asset name or URL later
+
+    // Hudl-sourced stats
+    var stats: [SeasonStat]
+
+    // Computed
+    var latestSeason: SeasonStat? {
+        stats.sorted { $0.season > $1.season }.first
+    }
+}
+
+struct SeasonStat: Identifiable, Codable {
+    let id: UUID
+    var season: Int          // e.g. 2025
+    var gamesPlayed: Int
+    var tackles: Int?
+    var receptions: Int?
+    var passingYards: Int?
+    var rushingYards: Int?
+    var touchdowns: Int?
+
+    // Add whatever Hudl gives you — keep it flat
+}
+```
+
+**Key concepts:**
+- `Identifiable` — SwiftUI needs this to loop over items in `List` / `ForEach`
+- `Codable` — lets you encode/decode JSON (critical for Hudl import)
+- `UUID()` auto-generates unique IDs
+- Optional properties (`Int?`) — not every position tracks every stat
+
+### 1B. Create `MockData.swift`
+
+You need fake data to build against before Hudl import works.
+
+```swift
+import Foundation
+
+struct MockData {
+    static let athletes: [Athlete] = [
+        Athlete(
+            id: UUID(),
+            name: "Marcus Johnson",
+            position: "Wide Receiver",
+            school: "Worthing HS",
+            graduationYear: 2026,
+            profileImageName: "marcus_placeholder",
+            stats: [
+                SeasonStat(id: UUID(), season: 2025, gamesPlayed: 10,
+                           tackles: nil, receptions: 48, passingYards: nil,
+                           rushingYards: 120, touchdowns: 7),
+                SeasonStat(id: UUID(), season: 2024, gamesPlayed: 9,
+                           tackles: nil, receptions: 32, passingYards: nil,
+                           rushingYards: 80, touchdowns: 4)
+            ]
+        ),
+        Athlete(
+            id: UUID(),
+            name: "DeAndre Williams",
+            position: "Linebacker",
+            school: "Yates HS",
+            graduationYear: 2026,
+            profileImageName: nil,
+            stats: [
+                SeasonStat(id: UUID(), season: 2025, gamesPlayed: 10,
+                           tackles: 87, receptions: nil, passingYards: nil,
+                           rushingYards: nil, touchdowns: 2)
+            ]
+        )
+    ]
+}
+```
+
+### 1C. Create `AthleteStore.swift` (your state manager)
+
+This is the **single mutable container** that all views read from and write to.
+
+```swift
+import Foundation
+
+@Observable
+class AthleteStore {
+    var athletes: [Athlete] = MockData.athletes
+
+    func addAthlete(_ athlete: Athlete) {
+        athletes.append(athlete)
+    }
+
+    func deleteAthlete(at offsets: IndexSet) {
+        athletes.remove(atOffsets: offsets)
+    }
+
+    // We'll add Hudl import methods in Section 3
+}
+```
+
+> **2026 note:** `@Observable` (from the Observation framework) replaces the old
+> `ObservableObject` + `@Published` pattern. Xcode 16+ / iOS 17+. If you're
+> targeting iOS 16, use the old pattern — I'll show both if you need it.
+
+### 1D. Wire it into your app entry point
+
+Update `HuddleUpApp.swift`:
+
+```swift
+import SwiftUI
+
+@main
+struct HuddleUpApp: App {
+    @State private var store = AthleteStore()
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+                .environment(store)
+        }
+    }
+}
+```
+
+**What just happened:**
+- `@State` owns the store at the app level (top of the tree)
+- `.environment(store)` injects it so ANY child view can access it
+- No singletons, no global state — SwiftUI's environment is the dependency injection
+
+---
+
+## SECTION 2: Athlete Profiles UI
+
+**What you'll learn:** `NavigationStack`, `List`, `NavigationLink`, detail views, SF Symbols.
+
+### 2A. Update `ContentView.swift` — The Athlete List
+
+```swift
+import SwiftUI
+
+struct ContentView: View {
+    @Environment(AthleteStore.self) private var store
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(store.athletes) { athlete in
+                    NavigationLink(value: athlete.id) {
+                        AthleteRow(athlete: athlete)
+                    }
+                }
+                .onDelete(perform: store.deleteAthlete)
+            }
+            .navigationTitle("Athletes")
+            .navigationDestination(for: UUID.self) { athleteID in
+                if let athlete = store.athletes.first(where: { $0.id == athleteID }) {
+                    AthleteDetailView(athlete: athlete)
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink(destination: HudlImportView()) {
+                        Label("Import", systemImage: "square.and.arrow.down")
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+**Key concepts:**
+- `NavigationStack` — the 2023+ replacement for `NavigationView` (don't use the old one)
+- `navigationDestination(for:)` — type-safe navigation. You pass a value, it resolves the view
+- `@Environment(AthleteStore.self)` — pulls the store you injected in the app entry point
+- `ForEach` requires `Identifiable` items (that's why your model conforms to it)
+
+### 2B. Create `AthleteRow.swift` — List Cell
+
+```swift
+import SwiftUI
+
+struct AthleteRow: View {
+    let athlete: Athlete
+
+    var body: some View {
+        HStack(spacing: 14) {
+            // Profile image or placeholder
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .frame(width: 50, height: 50)
+
+                if let imageName = athlete.profileImageName {
+                    Image(imageName)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 50, height: 50)
+                        .clipShape(Circle())
+                } else {
+                    Image(systemName: "person.fill")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(athlete.name)
+                    .font(.headline)
+
+                Text("\(athlete.position) • Class of \(athlete.graduationYear)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            if let latest = athlete.latestSeason {
+                Text("\(latest.gamesPlayed)G")
+                    .font(.caption)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(.blue.opacity(0.1))
+                    .clipShape(Capsule())
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+```
+
+### 2C. Create `AthleteDetailView.swift` — Full Profile
+
+```swift
+import SwiftUI
+
+struct AthleteDetailView: View {
+    let athlete: Athlete
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+
+                // HEADER
+                HStack(spacing: 16) {
+                    ZStack {
+                        Circle()
+                            .fill(.ultraThinMaterial)
+                            .frame(width: 80, height: 80)
+                        Image(systemName: "person.fill")
+                            .font(.largeTitle)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(athlete.name)
+                            .font(.title.bold())
+                        Text(athlete.position)
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                        Text("\(athlete.school) • \(athlete.graduationYear)")
+                            .font(.subheadline)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(.horizontal)
+
+                Divider()
+
+                // STATS SECTION — we'll upgrade this with Charts in Section 4
+                if let latest = athlete.latestSeason {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("\(latest.season) Season")
+                            .font(.headline)
+
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: 16) {
+                            StatCard(label: "Games", value: "\(latest.gamesPlayed)")
+
+                            if let td = latest.touchdowns {
+                                StatCard(label: "TDs", value: "\(td)")
+                            }
+                            if let rec = latest.receptions {
+                                StatCard(label: "Rec", value: "\(rec)")
+                            }
+                            if let rush = latest.rushingYards {
+                                StatCard(label: "Rush Yds", value: "\(rush)")
+                            }
+                            if let tck = latest.tackles {
+                                StatCard(label: "Tackles", value: "\(tck)")
+                            }
+                            if let pass = latest.passingYards {
+                                StatCard(label: "Pass Yds", value: "\(pass)")
+                            }
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+
+                // SEASON HISTORY (placeholder for Charts in Section 4)
+                if athlete.stats.count > 1 {
+                    VStack(alignment: .leading) {
+                        Text("Season History")
+                            .font(.headline)
+                            .padding(.horizontal)
+                        Text("→ Charts coming in Section 4")
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal)
+                    }
+                }
+            }
+            .padding(.vertical)
+        }
+        .navigationTitle(athlete.name)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// Reusable stat box
+struct StatCard: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text(value)
+                .font(.title2.bold())
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+```
+
+---
+
+## SECTION 3: Hudl Data Import
+
+**What you'll learn:** `fileImporter`, CSV parsing, JSON decoding, `async/await`.
+
+### How Hudl Exports Work
+
+Hudl lets coaches/athletes export stats as **CSV files**. The flow:
+1. Go to Hudl → athlete profile → export stats
+2. You get a `.csv` with columns like: `Name, Position, Games, Tackles, Receptions...`
+3. Your app reads that file and creates `Athlete` objects
+
+### 3A. Create `HudlImportView.swift`
+
+```swift
+import SwiftUI
+import UniformTypeIdentifiers
+
+struct HudlImportView: View {
+    @Environment(AthleteStore.self) private var store
+    @State private var showFileImporter = false
+    @State private var importResult: ImportResult?
+
+    enum ImportResult {
+        case success(Int)
+        case failure(String)
+    }
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Image(systemName: "square.and.arrow.down.on.square")
+                .font(.system(size: 60))
+                .foregroundStyle(.blue)
+
+            Text("Import from Hudl")
+                .font(.title2.bold())
+
+            Text("Export your athlete stats from Hudl as a CSV file, then import it here.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 40)
+
+            Button {
+                showFileImporter = true
+            } label: {
+                Label("Choose CSV File", systemImage: "doc.badge.plus")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(.blue)
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+            }
+            .padding(.horizontal, 40)
+
+            // Result feedback
+            if let result = importResult {
+                switch result {
+                case .success(let count):
+                    Label("\(count) athletes imported", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                case .failure(let msg):
+                    Label(msg, systemImage: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: [UTType.commaSeparatedText, UTType.plainText],
+            allowsMultipleSelection: false
+        ) { result in
+            handleFileImport(result)
+        }
+        .navigationTitle("Import")
+    }
+
+    private func handleFileImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+
+            // Must access security-scoped resource
+            guard url.startAccessingSecurityScopedResource() else {
+                importResult = .failure("Permission denied")
+                return
+            }
+            defer { url.stopAccessingSecurityScopedResource() }
+
+            do {
+                let csvString = try String(contentsOf: url, encoding: .utf8)
+                let athletes = HudlCSVParser.parse(csv: csvString)
+                for athlete in athletes {
+                    store.addAthlete(athlete)
+                }
+                importResult = .success(athletes.count)
+            } catch {
+                importResult = .failure("Failed to read file: \(error.localizedDescription)")
+            }
+
+        case .failure(let error):
+            importResult = .failure(error.localizedDescription)
+        }
+    }
+}
+```
+
+**Key concepts:**
+- `.fileImporter` — native SwiftUI file picker. No UIKit wrapping needed.
+- `UTType.commaSeparatedText` — tells the picker to filter for CSV files
+- Security-scoped resources — iOS sandboxing requires you to explicitly access external files
+- `defer` — cleanup runs no matter how the function exits (like a `finally` block)
+
+### 3B. Create `HudlCSVParser.swift`
+
+```swift
+import Foundation
+
+struct HudlCSVParser {
+
+    /// Parse a Hudl-style CSV string into Athlete objects.
+    ///
+    /// Expected CSV columns (adjust to match your actual Hudl export):
+    /// Name, Position, School, Grad Year, Season, Games, Tackles, Receptions,
+    /// Passing Yards, Rushing Yards, Touchdowns
+    static func parse(csv: String) -> [Athlete] {
+        let rows = csv.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        guard rows.count > 1 else { return [] }
+
+        // First row = headers
+        let headers = rows[0]
+            .components(separatedBy: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+
+        // Build a column index map
+        var col: [String: Int] = [:]
+        for (i, header) in headers.enumerated() {
+            col[header] = i
+        }
+
+        // Group rows by athlete name (one athlete may have multiple seasons)
+        var athleteMap: [String: Athlete] = [:]
+
+        for row in rows.dropFirst() {
+            let fields = parseCSVRow(row)
+            guard fields.count >= headers.count else { continue }
+
+            let name = field(fields, col, "name") ?? "Unknown"
+            let position = field(fields, col, "position") ?? "Unknown"
+            let school = field(fields, col, "school") ?? ""
+            let gradYear = intField(fields, col, "grad year") ?? 2026
+            let season = intField(fields, col, "season") ?? 2025
+
+            let stat = SeasonStat(
+                id: UUID(),
+                season: season,
+                gamesPlayed: intField(fields, col, "games") ?? 0,
+                tackles: intField(fields, col, "tackles"),
+                receptions: intField(fields, col, "receptions"),
+                passingYards: intField(fields, col, "passing yards"),
+                rushingYards: intField(fields, col, "rushing yards"),
+                touchdowns: intField(fields, col, "touchdowns")
+            )
+
+            if var existing = athleteMap[name] {
+                existing.stats.append(stat)
+                athleteMap[name] = existing
+            } else {
+                athleteMap[name] = Athlete(
+                    id: UUID(),
+                    name: name,
+                    position: position,
+                    school: school,
+                    graduationYear: gradYear,
+                    profileImageName: nil,
+                    stats: [stat]
+                )
+            }
+        }
+
+        return Array(athleteMap.values)
+    }
+
+    // MARK: - Helpers
+
+    /// Handle quoted CSV fields (commas inside quotes)
+    private static func parseCSVRow(_ row: String) -> [String] {
+        var fields: [String] = []
+        var current = ""
+        var inQuotes = false
+
+        for char in row {
+            if char == "\"" {
+                inQuotes.toggle()
+            } else if char == "," && !inQuotes {
+                fields.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+            } else {
+                current.append(char)
+            }
+        }
+        fields.append(current.trimmingCharacters(in: .whitespaces))
+        return fields
+    }
+
+    private static func field(_ fields: [String], _ col: [String: Int], _ key: String) -> String? {
+        guard let i = col[key], i < fields.count else { return nil }
+        let val = fields[i]
+        return val.isEmpty ? nil : val
+    }
+
+    private static func intField(_ fields: [String], _ col: [String: Int], _ key: String) -> Int? {
+        guard let str = field(fields, col, key) else { return nil }
+        return Int(str)
+    }
+}
+```
+
+### 3C. Sample CSV for Testing
+
+Save this as `test_hudl_export.csv` and import it in the simulator:
+
+```
+Name, Position, School, Grad Year, Season, Games, Tackles, Receptions, Passing Yards, Rushing Yards, Touchdowns
+Marcus Johnson, Wide Receiver, Worthing HS, 2026, 2025, 10, , 48, , 120, 7
+Marcus Johnson, Wide Receiver, Worthing HS, 2026, 2024, 9, , 32, , 80, 4
+DeAndre Williams, Linebacker, Yates HS, 2026, 2025, 10, 87, , , , 2
+Keisha Brown, Quarterback, Wheatley HS, 2027, 2025, 10, , , 2450, 380, 22
+```
+
+---
+
+## SECTION 4: SwiftUI Charts
+
+**What you'll learn:** The `Charts` framework, `BarMark`, `LineMark`, `PointMark`, and data-driven chart building.
+
+> Requires `import Charts` — available iOS 16+ (Swift Charts framework).
+
+### 4A. Create `AthleteChartView.swift` — Season Comparison
+
+```swift
+import SwiftUI
+import Charts
+
+struct AthleteChartView: View {
+    let athlete: Athlete
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+
+            // TOUCHDOWN TREND (Line Chart)
+            if athlete.stats.contains(where: { $0.touchdowns != nil }) {
+                ChartSection(title: "Touchdowns by Season") {
+                    Chart(athlete.stats.sorted { $0.season < $1.season }) { stat in
+                        if let tds = stat.touchdowns {
+                            LineMark(
+                                x: .value("Season", String(stat.season)),
+                                y: .value("TDs", tds)
+                            )
+                            .foregroundStyle(.blue)
+                            .symbol(Circle())
+
+                            PointMark(
+                                x: .value("Season", String(stat.season)),
+                                y: .value("TDs", tds)
+                            )
+                            .foregroundStyle(.blue)
+                            .annotation(position: .top) {
+                                Text("\(tds)")
+                                    .font(.caption2.bold())
+                            }
+                        }
+                    }
+                    .frame(height: 200)
+                }
+            }
+
+            // GAMES PLAYED (Bar Chart)
+            ChartSection(title: "Games Played") {
+                Chart(athlete.stats.sorted { $0.season < $1.season }) { stat in
+                    BarMark(
+                        x: .value("Season", String(stat.season)),
+                        y: .value("Games", stat.gamesPlayed)
+                    )
+                    .foregroundStyle(.green.gradient)
+                    .cornerRadius(6)
+                }
+                .frame(height: 200)
+            }
+
+            // YARDS BREAKDOWN (Stacked Bar — if applicable)
+            if athlete.stats.contains(where: { ($0.rushingYards ?? 0) + ($0.passingYards ?? 0) > 0 }) {
+                ChartSection(title: "Yards Breakdown") {
+                    Chart(athlete.stats.sorted { $0.season < $1.season }) { stat in
+                        if let rush = stat.rushingYards {
+                            BarMark(
+                                x: .value("Season", String(stat.season)),
+                                y: .value("Yards", rush)
+                            )
+                            .foregroundStyle(by: .value("Type", "Rushing"))
+                        }
+                        if let pass = stat.passingYards {
+                            BarMark(
+                                x: .value("Season", String(stat.season)),
+                                y: .value("Yards", pass)
+                            )
+                            .foregroundStyle(by: .value("Type", "Passing"))
+                        }
+                    }
+                    .chartForegroundStyleScale([
+                        "Rushing": .orange,
+                        "Passing": .purple
+                    ])
+                    .frame(height: 200)
+                }
+            }
+        }
+        .padding()
+    }
+}
+
+// Reusable chart wrapper
+struct ChartSection<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline)
+            content
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+}
+```
+
+### 4B. Plug Charts into the Detail View
+
+Go back to `AthleteDetailView.swift` and replace the "Charts coming in Section 4" placeholder:
+
+```swift
+// Replace this block:
+// Text("→ Charts coming in Section 4")
+
+// With this:
+AthleteChartView(athlete: athlete)
+```
+
+---
+
+## SECTION 5: WebKit — Embedded Hudl Profiles
+
+**What you'll learn:** `WKWebView` via `UIViewRepresentable`, loading external URLs in-app.
+
+### 5A. Create `WebView.swift`
+
+```swift
+import SwiftUI
+import WebKit
+
+struct WebView: UIViewRepresentable {
+    let url: URL
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.allowsInlineMediaPlayback = true
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.allowsBackForwardNavigationGestures = true
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        let request = URLRequest(url: url)
+        webView.load(request)
+    }
+}
+```
+
+**Key concepts:**
+- `UIViewRepresentable` — the bridge between UIKit and SwiftUI. Any UIKit view can be wrapped this way.
+- `makeUIView` — called once to create the view
+- `updateUIView` — called when SwiftUI state changes
+
+### 5B. Create `HudlProfileView.swift`
+
+```swift
+import SwiftUI
+
+struct HudlProfileView: View {
+    let athleteName: String
+
+    // Construct a Hudl search URL (or use direct profile link if you have it)
+    var hudlURL: URL {
+        let query = athleteName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        return URL(string: "https://www.hudl.com/search?query=\(query)")!
+    }
+
+    var body: some View {
+        WebView(url: hudlURL)
+            .ignoresSafeArea(edges: .bottom)
+            .navigationTitle("Hudl Profile")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    ShareLink(item: hudlURL) {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                }
+            }
+    }
+}
+```
+
+### 5C. Add a "View on Hudl" Button to Detail View
+
+In `AthleteDetailView.swift`, add inside the `VStack`:
+
+```swift
+NavigationLink(destination: HudlProfileView(athleteName: athlete.name)) {
+    Label("View on Hudl", systemImage: "globe")
+        .font(.headline)
+        .frame(maxWidth: .infinity)
+        .padding()
+        .background(.orange)
+        .foregroundStyle(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+}
+.padding(.horizontal)
+```
+
+---
+
+## SECTION 6: Data Persistence (Bonus)
+
+Save imported athletes to disk so they survive app restarts.
+
+### 6A. Add save/load to `AthleteStore.swift`
+
+```swift
+import Foundation
+
+@Observable
+class AthleteStore {
+    var athletes: [Athlete] = []
+
+    private let saveKey = "huddleup_athletes"
+
+    init() {
+        load()
+        if athletes.isEmpty {
+            athletes = MockData.athletes // fallback to mock data
+        }
+    }
+
+    func addAthlete(_ athlete: Athlete) {
+        athletes.append(athlete)
+        save()
+    }
+
+    func deleteAthlete(at offsets: IndexSet) {
+        athletes.remove(atOffsets: offsets)
+        save()
+    }
+
+    // MARK: - Persistence
+
+    private var saveURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("athletes.json")
+    }
+
+    func save() {
+        do {
+            let data = try JSONEncoder().encode(athletes)
+            try data.write(to: saveURL)
+        } catch {
+            print("Save failed: \(error)")
+        }
+    }
+
+    func load() {
+        do {
+            let data = try Data(contentsOf: saveURL)
+            athletes = try JSONDecoder().decode([Athlete].self, from: data)
+        } catch {
+            print("Load failed (first launch?): \(error)")
+        }
+    }
+}
+```
+
+---
+
+## FILE CHECKLIST
+
+When you're done, your Xcode project should have these files:
+
+```
+HuddleUp/
+├── HuddleUpApp.swift          ← Modified (Section 1D)
+├── ContentView.swift           ← Modified (Section 2A)
+├── Models/
+│   ├── Athlete.swift           ← New (Section 1A)
+│   └── MockData.swift          ← New (Section 1B)
+├── Store/
+│   └── AthleteStore.swift      ← New (Section 1C, updated 6A)
+├── Views/
+│   ├── AthleteRow.swift        ← New (Section 2B)
+│   ├── AthleteDetailView.swift ← New (Section 2C)
+│   ├── AthleteChartView.swift  ← New (Section 4A)
+│   ├── HudlImportView.swift    ← New (Section 3A)
+│   └── HudlProfileView.swift   ← New (Section 5B)
+├── Utilities/
+│   ├── HudlCSVParser.swift     ← New (Section 3B)
+│   └── WebView.swift           ← New (Section 5A)
+└── test_hudl_export.csv        ← For testing (Section 3C)
+```
+
+---
+
+## BUILD ORDER
+
+Work through these in order. Each section compiles independently:
+
+| Order | Section | What Compiles After |
+|-------|---------|-------------------|
+| 1 | Section 1 (Models + Store + App) | App launches with empty list |
+| 2 | Section 2 (Profile UI) | List + detail view with mock data |
+| 3 | Section 3 (Hudl Import) | File picker + CSV parsing works |
+| 4 | Section 4 (Charts) | Stats display as interactive charts |
+| 5 | Section 5 (WebKit) | Hudl profiles load in-app |
+| 6 | Section 6 (Persistence) | Data survives app restart |
+
+Each section builds on the last. Get it compiling before moving on.
